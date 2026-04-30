@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "busypipe"
+version = "0.1.0"
+description = "A TCP application protocol that keeps a minimum busy pipe with randomized padding."
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+authors = [
+  { name = "wizd" }
+]
+keywords = ["tcp", "keepalive", "asyncio", "protocol", "padding"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet",
+  "Topic :: System :: Networking",
+]
+
+[project.urls]
+Homepage = "https://github.com/wizd/busypipe"
+Repository = "https://github.com/wizd/busypipe"
+Issues = "https://github.com/wizd/busypipe/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["busypipe*"]
