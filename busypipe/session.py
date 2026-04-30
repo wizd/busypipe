@@ -77,6 +77,7 @@ class BusyPipeSession:
         self._tasks: set[asyncio.Task[None]] = set()
         self._established = False
         self._closed = False
+        self._closed_event = asyncio.Event()
         self._last_received_at = time.monotonic()
 
     async def start(self) -> None:
@@ -97,9 +98,24 @@ class BusyPipeSession:
             await self._send_data_chunk(chunk)
 
     async def recv(self) -> bytes:
-        if self._closed and self.recv_queue.empty():
+        if not self.recv_queue.empty():
+            return self.recv_queue.get_nowait()
+        if self._closed:
             raise ConnectionError("BusyPipe session is closed")
-        return await self.recv_queue.get()
+
+        recv_task = asyncio.create_task(self.recv_queue.get())
+        close_task = asyncio.create_task(self._closed_event.wait())
+        done, pending = await asyncio.wait(
+            {recv_task, close_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+        if recv_task in done:
+            return recv_task.result()
+        raise ConnectionError("BusyPipe session is closed")
 
     async def close(self) -> None:
         if self._closed:
@@ -206,6 +222,7 @@ class BusyPipeSession:
         if self._closed:
             return
         self._closed = True
+        self._closed_event.set()
         current = asyncio.current_task()
         for task in list(self._tasks):
             if task is not current:

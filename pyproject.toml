@@ -28,6 +28,9 @@ Homepage = "https://github.com/wizd/busypipe"
 Repository = "https://github.com/wizd/busypipe"
 Issues = "https://github.com/wizd/busypipe/issues"
 
+[project.scripts]
+busypipe-wrap = "busypipe.wrap:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["busypipe*"]
