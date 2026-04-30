@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import socket
 import unittest
 
 from busypipe.session import BusyPipeConfig
-from busypipe.wrap import BusyPipeTcpClientWrap, BusyPipeTcpServerWrap, TcpEndpoint, create_parser
+from busypipe.wrap import (
+    BusyPipeTcpClientWrap,
+    BusyPipeTcpServerWrap,
+    TcpEndpoint,
+    create_parser,
+)
 
 
 class WrapTests(unittest.IsolatedAsyncioTestCase):
@@ -56,6 +62,59 @@ class WrapTests(unittest.IsolatedAsyncioTestCase):
             echo_server.close()
             await echo_server.wait_closed()
 
+    async def test_wraps_plain_tcp_echo_service_over_ipv6(self) -> None:
+        if not _ipv6_loopback_available():
+            self.skipTest("IPv6 loopback is not available")
+
+        async def echo(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                while True:
+                    data = await reader.read(1024)
+                    if not data:
+                        break
+                    writer.write(data)
+                    await writer.drain()
+            finally:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+
+        echo_server = await asyncio.start_server(echo, "::1", 0, family=socket.AF_INET6)
+        echo_port = echo_server.sockets[0].getsockname()[1]
+
+        config = BusyPipeConfig(tick_ms=50, idle_timeout_ms=3000)
+        server_wrap = BusyPipeTcpServerWrap(
+            listen=TcpEndpoint("::1", 0),
+            target=TcpEndpoint("::1", echo_port),
+            config=config,
+        )
+        await server_wrap.start()
+        busypipe_port = server_wrap.sockets()[0].getsockname()[1]
+
+        client_wrap = BusyPipeTcpClientWrap(
+            listen=TcpEndpoint("::1", 0),
+            remote=TcpEndpoint("::1", busypipe_port),
+            config=config,
+        )
+        await client_wrap.start()
+        local_port = client_wrap.sockets()[0].getsockname()[1]
+
+        try:
+            reader, writer = await asyncio.open_connection("::1", local_port, family=socket.AF_INET6)
+            writer.write(b"wrapped ipv6 tcp payload")
+            await writer.drain()
+
+            response = await reader.readexactly(len(b"wrapped ipv6 tcp payload"))
+            self.assertEqual(response, b"wrapped ipv6 tcp payload")
+
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await client_wrap.close()
+            await server_wrap.close()
+            echo_server.close()
+            await echo_server.wait_closed()
+
     def test_cli_parser_accepts_client_and_server_modes(self) -> None:
         parser = create_parser()
 
@@ -86,6 +145,23 @@ class WrapTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(server_args.mode, "server")
         self.assertEqual(server_args.target_port, 22)
+
+    def test_endpoint_accepts_bracketed_ipv6_literals(self) -> None:
+        endpoint = TcpEndpoint("[2001:db8::1]", 4000)
+
+        self.assertEqual(endpoint.host, "2001:db8::1")
+        self.assertEqual(endpoint.port, 4000)
+
+
+def _ipv6_loopback_available() -> bool:
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        sock.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
 
 
 if __name__ == "__main__":

@@ -9,7 +9,11 @@ class BusyPipeClient:
     def __init__(self, *, config: BusyPipeConfig | None = None) -> None:
         self.config = config or BusyPipeConfig()
 
-    async def connect(self, host: str, port: int) -> BusyPipeSession:
+    async def connect(
+        self,
+        host: str,
+        port: int,
+    ) -> BusyPipeSession:
         reader, writer = await asyncio.open_connection(host, port)
         session = BusyPipeSession(reader, writer, config=self.config)
         await session.start()
@@ -19,7 +23,6 @@ class BusyPipeClient:
         self,
         host: str,
         port: int,
-        *,
         initial_delay: float = 1.0,
         max_delay: float = 30.0,
     ) -> BusyPipeSession:

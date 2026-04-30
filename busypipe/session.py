@@ -105,17 +105,17 @@ class BusyPipeSession:
 
         recv_task = asyncio.create_task(self.recv_queue.get())
         close_task = asyncio.create_task(self._closed_event.wait())
-        done, pending = await asyncio.wait(
-            {recv_task, close_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-
-        if recv_task in done:
-            return recv_task.result()
-        raise ConnectionError("BusyPipe session is closed")
+        tasks = {recv_task, close_task}
+        try:
+            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if recv_task in done:
+                return recv_task.result()
+            raise ConnectionError("BusyPipe session is closed")
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def close(self) -> None:
         if self._closed:

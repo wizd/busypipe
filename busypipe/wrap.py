@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import socket
 from dataclasses import dataclass
 
 from .client import BusyPipeClient
@@ -20,6 +21,11 @@ class TcpEndpoint:
     host: str
     port: int
 
+    def __post_init__(self) -> None:
+        host = self.host
+        if host.startswith("[") and host.endswith("]"):
+            object.__setattr__(self, "host", host[1:-1])
+
 
 class BusyPipeTcpClientWrap:
     """Listen as a normal TCP server and forward each connection over BusyPipe."""
@@ -34,32 +40,32 @@ class BusyPipeTcpClientWrap:
         self.listen = listen
         self.remote = remote
         self.config = config or BusyPipeConfig()
-        self._server: asyncio.AbstractServer | None = None
+        self._servers: list[asyncio.AbstractServer] = []
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(
+        sock = _create_dualstack_socket(self.listen.host, self.listen.port)
+        server = await asyncio.start_server(
             self._handle_local_connection,
-            self.listen.host,
-            self.listen.port,
+            sock=sock,
         )
+        self._servers.append(server)
 
     async def serve_forever(self) -> None:
-        if self._server is None:
+        if not self._servers:
             raise RuntimeError("client wrap has not been started")
-        async with self._server:
-            await self._server.serve_forever()
+        await asyncio.gather(*(server.serve_forever() for server in self._servers))
 
     async def close(self) -> None:
-        if self._server is None:
-            return
-        self._server.close()
-        await self._server.wait_closed()
-        self._server = None
+        for server in self._servers:
+            server.close()
+        await asyncio.gather(*(server.wait_closed() for server in self._servers))
+        self._servers = []
 
     def sockets(self):
-        if self._server is None:
-            return ()
-        return self._server.sockets or ()
+        sockets = []
+        for server in self._servers:
+            sockets.extend(server.sockets or ())
+        return tuple(sockets)
 
     async def _handle_local_connection(
         self,
@@ -69,7 +75,10 @@ class BusyPipeTcpClientWrap:
         session: BusyPipeSession | None = None
         try:
             client = BusyPipeClient(config=self.config)
-            session = await client.connect(self.remote.host, self.remote.port)
+            session = await client.connect(
+                self.remote.host,
+                self.remote.port,
+            )
             await relay_tcp_and_busypipe(local_reader, local_writer, session)
         except Exception:
             LOGGER.exception("local TCP to BusyPipe relay failed")
@@ -93,19 +102,28 @@ class BusyPipeTcpServerWrap:
         self.listen = listen
         self.target = target
         self.config = config or BusyPipeConfig()
-        self._server = BusyPipeServer(config=self.config, on_session=self._handle_session)
+        self._servers: list[BusyPipeServer] = []
 
     async def start(self) -> None:
-        await self._server.start(self.listen.host, self.listen.port)
+        sock = _create_dualstack_socket(self.listen.host, self.listen.port)
+        server = BusyPipeServer(config=self.config, on_session=self._handle_session)
+        await server.start(sock=sock)
+        self._servers.append(server)
 
     async def serve_forever(self) -> None:
-        await self._server.serve_forever()
+        if not self._servers:
+            raise RuntimeError("server wrap has not been started")
+        await asyncio.gather(*(server.serve_forever() for server in self._servers))
 
     async def close(self) -> None:
-        await self._server.close()
+        await asyncio.gather(*(server.close() for server in self._servers), return_exceptions=True)
+        self._servers = []
 
     def sockets(self):
-        return self._server.sockets()
+        sockets = []
+        for server in self._servers:
+            sockets.extend(server.sockets())
+        return tuple(sockets)
 
     async def _handle_session(self, session: BusyPipeSession) -> None:
         target_reader: asyncio.StreamReader | None = None
@@ -180,6 +198,40 @@ def build_config(args: argparse.Namespace) -> BusyPipeConfig:
     )
 
 
+def _normalize_dualstack_host(host: str) -> str:
+    host = host.strip()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if host in ("0.0.0.0", "127.0.0.1", ""):
+        return "::"
+    with contextlib.suppress(OSError):
+        socket.inet_pton(socket.AF_INET, host)
+        return "::"
+    return host
+
+
+def _create_dualstack_socket(host: str, port: int) -> socket.socket:
+    bind_host = _normalize_dualstack_host(host)
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        sock.bind((bind_host, port, 0, 0))
+        sock.listen(100)
+        sock.setblocking(False)
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
+def format_endpoint(endpoint: TcpEndpoint) -> str:
+    host = endpoint.host
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{host}:{endpoint.port}"
+
+
 async def run_client_wrap(args: argparse.Namespace) -> None:
     wrap = BusyPipeTcpClientWrap(
         listen=TcpEndpoint(args.listen_host, args.listen_port),
@@ -188,11 +240,9 @@ async def run_client_wrap(args: argparse.Namespace) -> None:
     )
     await wrap.start()
     LOGGER.info(
-        "listening on %s:%s and forwarding to BusyPipe server %s:%s",
-        args.listen_host,
-        args.listen_port,
-        args.remote_host,
-        args.remote_port,
+        "listening on %s and forwarding to BusyPipe server %s",
+        format_endpoint(wrap.listen),
+        format_endpoint(wrap.remote),
     )
     await wrap.serve_forever()
 
@@ -205,11 +255,9 @@ async def run_server_wrap(args: argparse.Namespace) -> None:
     )
     await wrap.start()
     LOGGER.info(
-        "listening for BusyPipe on %s:%s and forwarding to TCP target %s:%s",
-        args.listen_host,
-        args.listen_port,
-        args.target_host,
-        args.target_port,
+        "listening for BusyPipe on %s and forwarding to TCP target %s",
+        format_endpoint(wrap.listen),
+        format_endpoint(wrap.target),
     )
     await wrap.serve_forever()
 

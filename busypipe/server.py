@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import socket
 from typing import Awaitable, Callable
 
 from .session import BusyPipeConfig, BusyPipeSession
@@ -22,8 +23,28 @@ class BusyPipeServer:
         self._server: asyncio.AbstractServer | None = None
         self._sessions: set[BusyPipeSession] = set()
 
-    async def start(self, host: str, port: int) -> None:
-        self._server = await asyncio.start_server(self._handle_connection, host, port)
+    async def start(
+        self,
+        host: str | None = None,
+        port: int | None = None,
+        *,
+        family: int = socket.AF_UNSPEC,
+        sock: socket.socket | None = None,
+    ) -> None:
+        if sock is not None:
+            self._server = await asyncio.start_server(
+                self._handle_connection,
+                sock=sock,
+            )
+            return
+        if host is None or port is None:
+            raise ValueError("host and port are required when sock is not provided")
+        self._server = await asyncio.start_server(
+            self._handle_connection,
+            host,
+            port,
+            family=family,
+        )
 
     async def serve_forever(self) -> None:
         if self._server is None:
@@ -58,6 +79,8 @@ class BusyPipeServer:
                 await self.on_session(session)
             else:
                 await session.wait_closed()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            return
         finally:
             self._sessions.discard(session)
             with contextlib.suppress(Exception):

@@ -115,11 +115,16 @@ This deployment was tested with:
 
 - Client host: `wizard@192.168.3.11`
 - Server host: `admin@18.183.135.254`
-- Client listener: `0.0.0.0:4000`
-- BusyPipe server listener: `0.0.0.0:4000`
+- Client IPv6: `240e:390:a8d:1fa0:215:5dff:fe03:5b30`
+- Server IPv4: `18.183.135.254`
+- Server IPv6: `2406:da14:209:100:967:7ff1:e0bb:9f5e`
+- Client listener: single dual-stack socket `*:4000` (`v6only:0`)
+- BusyPipe server listener: single dual-stack socket `*:4000` (`v6only:0`)
 - Server-side TCP target: `127.0.0.1:3306`
 
 The remote hosts had Python `3.7.3` and `3.9.2`. Because `pyproject.toml` currently declares Python `3.11+`, the deployment runs directly from source instead of using `pip install`.
+
+The deployment uses dual-stack listeners on both sides. BusyPipe opens one normal TCP connection per wrapped local connection; address selection, MPTCP subflows, and cross-interface behavior are left to the operating system.
 
 Source layout on both hosts:
 
@@ -132,7 +137,7 @@ Server command:
 ```sh
 cd ~/busypipe-app
 setsid /usr/bin/python3 -m busypipe.wrap server \
-  --listen-host 0.0.0.0 \
+  --listen-host :: \
   --listen-port 4000 \
   --target-host 127.0.0.1 \
   --target-port 3306 \
@@ -145,7 +150,7 @@ Client command:
 ```sh
 cd ~/busypipe-app
 setsid /usr/bin/python3 -m busypipe.wrap client \
-  --listen-host 0.0.0.0 \
+  --listen-host :: \
   --listen-port 4000 \
   --remote-host 18.183.135.254 \
   --remote-port 4000 \
@@ -172,20 +177,31 @@ tail -n 100 busypipe-wrap-server.log
 
 The hosts supported user-level systemd, but `loginctl show-user "$USER" -p Linger` returned `Linger=no`. In that environment, user services may stop when the SSH session ends, so this deployment uses `setsid` with pidfiles. For production, prefer a system-level service or enable user lingering with administrator approval.
 
-Verification used a long-lived local TCP probe on the client:
+Verification checks that both local listeners are active and that the server accepts both address families:
 
 ```sh
 python3 - <<'PY'
-import socket, time
-s = socket.create_connection(("127.0.0.1", 4000), timeout=5)
-print("probe_connected")
-time.sleep(10)
-s.close()
-print("probe_closed")
+import socket
+
+checks = [
+    ("local_ipv4", socket.AF_INET, ("127.0.0.1", 4000)),
+    ("local_ipv6", socket.AF_INET6, ("::1", 4000)),
+    ("remote_ipv4", socket.AF_INET, ("18.183.135.254", 4000)),
+    ("remote_ipv6", socket.AF_INET6, ("2406:da14:209:100:967:7ff1:e0bb:9f5e", 4000)),
+]
+
+for name, family, address in checks:
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    try:
+        sock.connect(address)
+        print(name, "ok")
+    finally:
+        sock.close()
 PY
 ```
 
-While the probe was connected, the server showed an established BusyPipe connection on `:4000` and an established local target connection to `127.0.0.1:3306`.
+`netstat -antp` should show `0.0.0.0:4000` and `:::4000` listeners. Any additional IPv4 or IPv6 subflows are owned by the OS/MPTCP stack, not by BusyPipe.
 
 ## Protocol
 
