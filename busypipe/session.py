@@ -94,8 +94,12 @@ class BusyPipeSession:
         if not data:
             return
 
-        for chunk in self._split_for_mixed(data):
-            await self._send_data_chunk(chunk)
+        if self.scheduler.deficit > 0:
+            for chunk in self._split_for_mixed(data):
+                await self._send_data_chunk(chunk)
+        else:
+            for chunk in self._split_for_data(data):
+                await self._write_frame(FrameType.DATA, chunk)
 
     async def recv(self) -> bytes:
         if not self.recv_queue.empty():
@@ -193,9 +197,12 @@ class BusyPipeSession:
             return
 
     async def _send_data_chunk(self, data: bytes) -> None:
+        deficit = self.scheduler.deficit
+        min_mixed_payload = MIXED_METADATA_LEN + len(data) + self.config.min_jitter_bytes
+        deficit_payload = max(0, deficit - HEADER_LEN)
         target_payload_len = min(
             self.codec.max_payload_size,
-            max(MIXED_METADATA_LEN + len(data) + self.config.min_jitter_bytes, 64),
+            max(min_mixed_payload, deficit_payload),
         )
         try:
             payload = self.mixer.build(data, target_payload_len)
@@ -234,6 +241,10 @@ class BusyPipeSession:
     def _split_for_mixed(self, data: bytes) -> list[bytes]:
         max_mixed_data = self.codec.max_payload_size - MIXED_METADATA_LEN - self.config.min_jitter_bytes
         max_data = max(1, max_mixed_data)
+        return [data[index : index + max_data] for index in range(0, len(data), max_data)]
+
+    def _split_for_data(self, data: bytes) -> list[bytes]:
+        max_data = max(1, self.codec.max_payload_size)
         return [data[index : index + max_data] for index in range(0, len(data), max_data)]
 
     @staticmethod

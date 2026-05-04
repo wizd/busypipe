@@ -18,6 +18,15 @@ class MinRateSchedulerTests(unittest.TestCase):
         self.assertEqual(scheduler.consume_deficit(), 150)
         self.assertEqual(scheduler.consume_deficit(), 250)
 
+    def test_deficit_property_reflects_remaining(self) -> None:
+        scheduler = MinRateScheduler(min_bps=8000, tick_ms=250)
+
+        self.assertEqual(scheduler.deficit, 250)
+        scheduler.record_sent(100)
+        self.assertEqual(scheduler.deficit, 150)
+        scheduler.record_sent(200)
+        self.assertEqual(scheduler.deficit, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

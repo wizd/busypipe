@@ -4,7 +4,7 @@ from enum import IntEnum
 
 
 MAGIC = 0x4250
-VERSION = 1
+VERSION = 2
 HEADER_LEN = 16
 
 DEFAULT_MIN_BPS = 8000

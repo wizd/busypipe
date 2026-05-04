@@ -23,7 +23,11 @@ class MinRateScheduler:
         if size > 0:
             self.bytes_sent_in_tick += size
 
+    @property
+    def deficit(self) -> int:
+        return max(0, self.target_bytes_per_tick - self.bytes_sent_in_tick)
+
     def consume_deficit(self) -> int:
-        deficit = max(0, self.target_bytes_per_tick - self.bytes_sent_in_tick)
+        deficit = self.deficit
         self.bytes_sent_in_tick = 0
         return deficit

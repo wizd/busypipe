@@ -1,6 +1,6 @@
 # BusyPipe Protocol
 
-BusyPipe 是一个运行在 TCP 之上的应用层通信协议。它的核心目标是在非稳定网络中维持持续、可观测的连接活跃度：即使没有真实业务数据，也保持最低 `8kbps` 的单向发送流量；当存在真实数据时，将真实数据混入随机填充数据中，并让真实数据在包内的位置发生随机抖动。
+BusyPipe 是一个运行在 TCP 之上的应用层通信协议。它的核心目标是在非稳定网络中维持持续、可观测的连接活跃度：通过动态计算实际发送速率，仅在低于最低速率门限时补充随机填充流量；当真实数据本身已经超过门限时，不再额外添加随机数据。
 
 本文档定义 BusyPipe 的协议格式、流量调度、数据混合策略，以及 Python 版本 client/server 的推荐实现方式。
 
@@ -8,8 +8,9 @@ BusyPipe 是一个运行在 TCP 之上的应用层通信协议。它的核心目
 
 - 基于 TCP 实现可靠、有序传输。
 - 每个启用方向最低保持 `8kbps` 通信流量。
-- 无业务数据时持续发送随机填充数据。
-- 有业务数据时优先使用混合帧，将真实数据包裹在随机数据之间。
+- 当实际发送速率低于最低门限时，发送随机填充补齐差额。
+- 有业务数据且需要补齐差额时，优先使用混合帧，将真实数据包裹在随机数据之间。
+- 有业务数据且实际发送速率已达到最低门限时，直接发送 `DATA` 帧，不再添加随机填充。
 - 真实数据在混合帧中的位置随机变化，相邻真实数据帧的偏移差至少 `8 byte`。
 - 接收端能够稳定解析真实数据，并丢弃随机填充。
 - Python client 和 server 使用同一套帧编解码、调度和状态机。
@@ -64,7 +65,7 @@ flowchart TD
 
 | 参数 | 默认值 | 说明 |
 | --- | --- | --- |
-| `version` | `1` | 协议版本 |
+| `version` | `2` | 协议版本 |
 | `min_bps` | `8000` | 最低单向发送速率 |
 | `tick_ms` | `250` | 发送调度周期 |
 | `max_frame_size` | `1400` | 单帧最大字节数 |
@@ -76,7 +77,7 @@ flowchart TD
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "min_bps": 8000,
   "tick_ms": 250,
   "max_frame_size": 1400,
@@ -89,7 +90,7 @@ flowchart TD
 协商规则：
 
 - `version` 不兼容时关闭连接。
-- `min_bps` 取双方支持范围内的值，默认不低于 `8000`。
+- `min_bps` 取双方支持范围内的值，表示每秒最低保底发送速率，默认不低于 `8000`。
 - `max_frame_size` 取双方较小值。
 - `tick_ms` 取双方较大值，避免过于频繁地发送小包。
 - `idle_timeout_ms` 取双方较小值。
@@ -121,7 +122,7 @@ BusyPipe 使用二进制帧。所有业务数据、随机填充、控制消息�
 | 字段 | 长度 | 说明 |
 | --- | ---: | --- |
 | `Magic` | 2 | 固定为 `0x4250`，ASCII 含义为 `BP` |
-| `Version` | 1 | 当前为 `1` |
+| `Version` | 1 | 当前为 `2` |
 | `Type` | 1 | 帧类型 |
 | `Flags` | 1 | 标志位，初始为 `0` |
 | `HeaderLen` | 1 | 帧头长度，当前为 `16` |
@@ -152,9 +153,20 @@ frame_size = HeaderLen + Length
 | `0x06` | `CLOSE` | 优雅关闭 |
 | `0x07` | `MIXED` | 随机填充和真实数据混合 |
 
+## v2 帧选择策略
+
+v2 中是否发送随机填充，不再由固定策略决定，而由当前 tick 的实际发送速率与 `min_bps` 的差额决定。
+
+| 场景 | 速率状态 | 发送策略 |
+| --- | --- | --- |
+| 无业务数据 | 低于 `min_bps` | 发送 `PAD` 补齐差额 |
+| 有业务数据 | 低于 `min_bps` | 发送 `MIXED`，用随机填充补齐差额 |
+| 有业务数据 | 达到或超过 `min_bps` | 发送 `DATA`，不添加随机填充 |
+| 无业务数据 | 达到或超过 `min_bps` | 本 tick 可不额外发送数据 |
+
 ## MIXED 帧
 
-`MIXED` 是 BusyPipe 的推荐业务承载格式。它将真实数据放在随机填充中间，并随机改变真实数据在 payload 内的位置。
+`MIXED` 用于速率不足时的补齐场景。它将真实数据放在随机填充中间，并随机改变真实数据在 payload 内的位置。
 
 `MIXED` payload 结构：
 
@@ -235,7 +247,7 @@ def choose_data_offset(min_offset, max_offset, last_offset, min_jitter):
 
 ## 最低 8kbps 调度
 
-发送端维护一个按 tick 运行的最低速率调度器。
+发送端维护一个按 tick 运行的最低速率调度器，按差额补齐最低流量。
 
 默认值：
 
@@ -244,13 +256,14 @@ def choose_data_offset(min_offset, max_offset, last_offset, min_jitter):
 - `tick_ms = 250`
 - `target_bytes_per_tick = 250`
 
-每个 tick 统计本方向已经写入 TCP 的完整帧字节数。若不足目标字节数，则发送 `PAD` 或 `MIXED` 帧补足。
+每个 tick 统计本方向已经写入 TCP 的完整帧字节数。若不足目标字节数，则按差额发送 `PAD` 或 `MIXED` 补足；若已达到或超过目标字节数，则不发送额外填充。
 
 调度规则：
 
 - 业务数据优先级高于随机填充。
-- 有业务数据时，优先编码为 `MIXED` 帧。
-- `DATA`、`MIXED`、`PAD` 的完整帧长度都计入最低流量。
+- 低于最低速率且有业务数据时，优先编码为 `MIXED` 帧。
+- 达到最低速率后，有业务数据时直接编码为 `DATA` 帧。
+- `DATA`、`MIXED`、`PAD`、`PING`、`PONG`、`CLOSE` 的完整帧长度都计入最低流量统计。
 - 如果一个 tick 内业务数据已经超过目标字节数，不额外发送 `PAD`。
 - 如果 TCP 写缓冲存在背压，允许跳过 `PAD`，但不得无限堆积填充帧。
 
@@ -261,9 +274,14 @@ async def scheduler_loop():
     while session.is_established:
         await sleep(tick_ms / 1000)
 
-        deficit = target_bytes_per_tick - bytes_sent_in_tick
+        actual_bytes = bytes_sent_in_tick
+        deficit = target_bytes_per_tick - actual_bytes
         if deficit > 0:
-            await send_padding(deficit)
+            pending_data = drain_data_queue()
+            if pending_data:
+                await send_mixed_with_padding(pending_data, deficit)
+            else:
+                await send_padding(deficit)
 
         bytes_sent_in_tick = 0
 ```
@@ -275,6 +293,16 @@ pad_payload_len = max(0, deficit - frame_header_len)
 ```
 
 如果 `deficit` 小于最小可用帧长度，可以累计到下一个 tick，避免制造过多极小 TCP segment。
+
+业务发送路径建议：
+
+```python
+async def send(data: bytes):
+    if current_rate_bps < min_bps:
+        await send_as_mixed(data)
+    else:
+        await send_as_data(data)
+```
 
 ## 接收侧行为
 
@@ -399,7 +427,7 @@ offset = secrets.choice(candidates)
 
 - 执行 `HELLO` 握手。
 - 启动读循环和调度循环。
-- 提供 `send(data: bytes)` 发送业务数据。
+- 提供 `send(data: bytes)` 发送业务数据，并按当前速率选择 `DATA` 或 `MIXED`。
 - 提供 `recv() -> bytes` 接收业务数据。
 - 管理连接关闭、超时和错误。
 
@@ -418,6 +446,16 @@ class BusyPipeSession:
 
     async def close(self) -> None:
         ...
+```
+
+`send(data)` 的推荐决策逻辑：
+
+```python
+async def send(self, data: bytes) -> None:
+    if self.current_rate_bps < self.min_bps:
+        await self._send_mixed(data)
+    else:
+        await self._send_data(data)
 ```
 
 ### Client
@@ -488,7 +526,7 @@ Python `asyncio.StreamWriter` 写入后应调用 `await writer.drain()`，让 TC
 2. client 进入重连流程。
 3. server 释放会话资源。
 
-由于 BusyPipe 本身持续发送 `PAD` 或 `MIXED`，通常不需要频繁发送 `PING`。`PING/PONG` 主要用于调试、显式延迟测量或判断应用层是否仍在响应。
+由于 BusyPipe 在低速场景会自动补齐 `PAD` 或 `MIXED`，通常不需要频繁发送 `PING`。`PING/PONG` 主要用于调试、显式延迟测量或判断应用层是否仍在响应。
 
 ## 安全说明
 
@@ -514,6 +552,8 @@ BusyPipe 的随机填充用于保活和降低流量空闲特征，不等于加�
 | `data_frames_sent_total` | 已发送 DATA 帧数 |
 | `mixed_frames_sent_total` | 已发送 MIXED 帧数 |
 | `pad_frames_sent_total` | 已发送 PAD 帧数 |
+| `data_frames_direct_total` | 已发送直通 DATA 帧数（无随机填充） |
+| `pad_bytes_saved_total` | 因实际速率已达标而未发送的填充字节数 |
 | `mixed_jitter_fallback_total` | 无法满足偏移抖动而降级的次数 |
 | `connection_idle_timeout_total` | 空闲超时次数 |
 | `protocol_error_total` | 协议错误次数 |
@@ -535,6 +575,10 @@ BusyPipe 的随机填充用于保活和降低流量空闲特征，不等于加�
 - 相邻 `MIXED` 帧偏移差至少 `8 byte`。
 - 业务数据过大时能切片或降级。
 - 调度器在无业务数据时维持约 `1000 byte/s`。
+- 调度器在有业务数据且发送速率低于 `min_bps` 时，能够补齐到目标速率。
+- 调度器在有业务数据且发送速率高于 `min_bps` 时，不再发送额外 `PAD`。
+- 实际速率等于 `min_bps` 的边界场景下行为稳定，不重复补齐。
+- 从高吞吐切换到低吞吐时，可在后续 tick 及时恢复差额补齐。
 
 集成测试：
 
@@ -546,14 +590,19 @@ BusyPipe 的随机填充用于保活和降低流量空闲特征，不等于加�
 
 ## 兼容性与版本演进
 
-当前版本为 `1`。
+当前版本为 `2`。
+
+v1 与 v2 的核心差异：
+
+- v1 以固定补流为主，真实数据常通过 `MIXED` 承载。
+- v2 以差额补齐为主，仅当实际速率低于 `min_bps` 时引入随机填充。
+- v2 在速率达标时允许 `DATA` 直通，减少无效随机流量。
 
 未来可扩展方向：
 
 - 帧层 AEAD 加密。
 - payload 压缩标志。
 - 多路复用 stream id。
-- 自适应最低速率。
 - 更复杂的长度分布和发送间隔抖动。
 
 版本演进原则：
