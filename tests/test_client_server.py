@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import time
 import unittest
 
 from busypipe import BusyPipeClient, BusyPipeConfig, BusyPipeServer
@@ -15,7 +16,7 @@ class ClientServerTests(unittest.IsolatedAsyncioTestCase):
                     data = await session.recv()
                     await session.send(data)
 
-        config = BusyPipeConfig(tick_ms=50, idle_timeout_ms=2000)
+        config = BusyPipeConfig(tick_ms=50, idle_timeout_ms=2000, warmup_ms=0)
         server = BusyPipeServer(config=config, on_session=echo)
         await server.start("127.0.0.1", 0)
         port = server.sockets()[0].getsockname()[1]
@@ -37,7 +38,7 @@ class ClientServerTests(unittest.IsolatedAsyncioTestCase):
                     data = await session.recv()
                     await session.send(data)
 
-        config = BusyPipeConfig(tick_ms=250, idle_timeout_ms=2000)
+        config = BusyPipeConfig(tick_ms=250, idle_timeout_ms=2000, warmup_ms=0)
         server = BusyPipeServer(config=config, on_session=echo)
         await server.start("127.0.0.1", 0)
         port = server.sockets()[0].getsockname()[1]
@@ -69,6 +70,60 @@ class ClientServerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await session.close()
             await server.close()
+
+    async def test_warmup_blocks_send_until_window_ends(self) -> None:
+        async def echo(session):
+            with contextlib.suppress(ConnectionError):
+                while not session.is_closed:
+                    data = await session.recv()
+                    await session.send(data)
+
+        config = BusyPipeConfig(tick_ms=50, idle_timeout_ms=2000, warmup_ms=200)
+        server = BusyPipeServer(config=config, on_session=echo)
+        await server.start("127.0.0.1", 0)
+        port = server.sockets()[0].getsockname()[1]
+
+        client = BusyPipeClient(config=config)
+        session = await client.connect("127.0.0.1", port)
+        try:
+            start = time.monotonic()
+            await session.send(b"warmup-block")
+            elapsed = time.monotonic() - start
+            self.assertGreaterEqual(elapsed, 0.15)
+            self.assertEqual(await session.recv(), b"warmup-block")
+        finally:
+            await session.close()
+            await server.close()
+
+    async def test_warmup_disabled_when_zero(self) -> None:
+        async def echo(session):
+            with contextlib.suppress(ConnectionError):
+                while not session.is_closed:
+                    data = await session.recv()
+                    await session.send(data)
+
+        config = BusyPipeConfig(tick_ms=50, idle_timeout_ms=2000, warmup_ms=0)
+        server = BusyPipeServer(config=config, on_session=echo)
+        await server.start("127.0.0.1", 0)
+        port = server.sockets()[0].getsockname()[1]
+
+        client = BusyPipeClient(config=config)
+        session = await client.connect("127.0.0.1", port)
+        try:
+            start = time.monotonic()
+            await session.send(b"no-warmup")
+            elapsed = time.monotonic() - start
+            self.assertLess(elapsed, 0.12)
+            self.assertEqual(await session.recv(), b"no-warmup")
+        finally:
+            await session.close()
+            await server.close()
+
+    def test_warmup_negotiates_max(self) -> None:
+        a = BusyPipeConfig(warmup_ms=1000)
+        b = BusyPipeConfig(warmup_ms=5000)
+        out = a.negotiate(b)
+        self.assertEqual(out.warmup_ms, 5000)
 
 
 if __name__ == "__main__":

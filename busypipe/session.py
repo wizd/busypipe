@@ -13,6 +13,7 @@ from .constants import (
     DEFAULT_MIN_BPS,
     DEFAULT_MIN_JITTER_BYTES,
     DEFAULT_TICK_MS,
+    DEFAULT_WARMUP_MS,
     HEADER_LEN,
     MIXED_METADATA_LEN,
     VERSION,
@@ -31,6 +32,7 @@ class BusyPipeConfig:
     max_frame_size: int = DEFAULT_MAX_FRAME_SIZE
     idle_timeout_ms: int = DEFAULT_IDLE_TIMEOUT_MS
     min_jitter_bytes: int = DEFAULT_MIN_JITTER_BYTES
+    warmup_ms: int = DEFAULT_WARMUP_MS
     direction: str = DEFAULT_DIRECTION
 
     def to_json(self) -> bytes:
@@ -51,6 +53,7 @@ class BusyPipeConfig:
             max_frame_size=min(self.max_frame_size, peer.max_frame_size),
             idle_timeout_ms=min(self.idle_timeout_ms, peer.idle_timeout_ms),
             min_jitter_bytes=max(self.min_jitter_bytes, peer.min_jitter_bytes),
+            warmup_ms=max(self.warmup_ms, peer.warmup_ms),
             direction=self.direction if self.direction == peer.direction else DEFAULT_DIRECTION,
         )
 
@@ -78,12 +81,19 @@ class BusyPipeSession:
         self._established = False
         self._closed = False
         self._closed_event = asyncio.Event()
+        self._warmup_done = asyncio.Event()
+        self._warmup_task: asyncio.Task[None] | None = None
         self._last_received_at = time.monotonic()
 
     async def start(self) -> None:
         await self._handshake()
         self._established = True
         self._last_received_at = time.monotonic()
+        if self.config.warmup_ms <= 0:
+            self._warmup_done.set()
+        else:
+            self._warmup_task = asyncio.create_task(self._warmup_timer(self.config.warmup_ms / 1000))
+            self._tasks.add(self._warmup_task)
         self._tasks.add(asyncio.create_task(self._read_loop()))
         self._tasks.add(asyncio.create_task(self._keepalive_loop()))
         self._tasks.add(asyncio.create_task(self._idle_watch_loop()))
@@ -93,6 +103,7 @@ class BusyPipeSession:
             raise ConnectionError("BusyPipe session is closed")
         if not data:
             return
+        await self._wait_for_warmup()
 
         if self.scheduler.deficit > 0:
             for chunk in self._split_for_mixed(data):
@@ -196,6 +207,14 @@ class BusyPipeSession:
         except asyncio.CancelledError:
             return
 
+    async def _warmup_timer(self, seconds: float) -> None:
+        try:
+            await asyncio.sleep(seconds)
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._warmup_done.set()
+
     async def _send_data_chunk(self, data: bytes) -> None:
         deficit = self.scheduler.deficit
         min_mixed_payload = MIXED_METADATA_LEN + len(data) + self.config.min_jitter_bytes
@@ -230,6 +249,7 @@ class BusyPipeSession:
             return
         self._closed = True
         self._closed_event.set()
+        self._warmup_done.set()
         current = asyncio.current_task()
         for task in list(self._tasks):
             if task is not current:
@@ -237,6 +257,26 @@ class BusyPipeSession:
         self.writer.close()
         with contextlib.suppress(Exception):
             await self.writer.wait_closed()
+
+    async def _wait_for_warmup(self) -> None:
+        if self._warmup_done.is_set():
+            if self._closed:
+                raise ConnectionError("BusyPipe session is closed")
+            return
+
+        warmup_wait = asyncio.create_task(self._warmup_done.wait())
+        closed_wait = asyncio.create_task(self._closed_event.wait())
+        tasks = {warmup_wait, closed_wait}
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        if self._closed:
+            raise ConnectionError("BusyPipe session is closed")
 
     def _split_for_mixed(self, data: bytes) -> list[bytes]:
         max_mixed_data = self.codec.max_payload_size - MIXED_METADATA_LEN - self.config.min_jitter_bytes

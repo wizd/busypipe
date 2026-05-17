@@ -71,6 +71,7 @@ flowchart TD
 | `max_frame_size` | `1400` | 单帧最大字节数 |
 | `idle_timeout_ms` | `15000` | 接收空闲超时 |
 | `min_jitter_bytes` | `8` | 相邻真实数据偏移的最小变化 |
+| `warmup_ms` | `3000` | 连接进入 `ESTABLISHED` 后只发送随机填充的窗口时长 |
 | `direction` | `bidirectional` | 保活方向 |
 
 `HELLO` payload 使用 UTF-8 JSON 编码：
@@ -83,6 +84,7 @@ flowchart TD
   "max_frame_size": 1400,
   "idle_timeout_ms": 15000,
   "min_jitter_bytes": 8,
+  "warmup_ms": 3000,
   "direction": "bidirectional"
 }
 ```
@@ -95,6 +97,21 @@ flowchart TD
 - `tick_ms` 取双方较大值，避免过于频繁地发送小包。
 - `idle_timeout_ms` 取双方较小值。
 - `min_jitter_bytes` 取双方较大值。
+- `warmup_ms` 取双方较大值，`0` 表示禁用 warmup 窗口。
+
+## 启动窗口 (warmup)
+
+`warmup_ms` 控制连接进入 `ESTABLISHED` 后的启动窗口行为。默认 `3000ms`，也就是头 3 秒内发送端只发送随机数据，不发送真实业务数据。
+
+规则如下：
+
+- warmup 起点是握手完成并进入 `ESTABLISHED` 的时刻。
+- warmup 窗口内，`DATA` 和 `MIXED` 不发送；最低速率调度器仍按差额发送 `PAD`。
+- 上层 `send` / `Write` 在 warmup 期间阻塞，直到窗口结束、连接关闭或写超时。
+- 接收端无需特殊状态机，仍按常规解析收到的所有帧类型。
+- 若对端未实现该参数，`warmup_ms` 缺省视为 `0`，兼容旧版本实现。
+
+该窗口用于降低连接刚建立时的可观测特征，使首段流量形态更接近保活流。
 
 ## 帧格式
 
