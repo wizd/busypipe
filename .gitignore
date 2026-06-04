@@ -3,6 +3,9 @@ __pycache__/
 *$py.class
 
 .Python
+.env
+.env.*
+!.env.example
 .venv/
 venv/
 env/
@@ -17,6 +20,8 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
+*.log
+*.pid
 
 .idea/
 .vscode/

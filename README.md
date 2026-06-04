@@ -30,7 +30,8 @@ The runtime implementation uses only the Python standard library.
 ## Install For Development
 
 ```powershell
-cd c:\apps\busypipe
+git clone https://github.com/wizd/busypipe.git
+cd busypipe
 python -m pip install -e .
 ```
 
@@ -109,33 +110,14 @@ busypipe-wrap client --help
 busypipe-wrap server --help
 ```
 
-### Field Deployment Notes
+### Deployment Notes
 
-This deployment was tested with:
+For a long-running wrapper deployment, run one BusyPipe server near the original TCP daemon and one BusyPipe client near the plain TCP client. BusyPipe opens one normal TCP connection per wrapped local connection; address selection, MPTCP subflows, and cross-interface behavior are left to the operating system.
 
-- Client host: `wizard@192.168.3.11`
-- Server host: `admin@18.183.135.254`
-- Client IPv6: `240e:390:a8d:1fa0:215:5dff:fe03:5b30`
-- Server IPv4: `18.183.135.254`
-- Server IPv6: `2406:da14:209:100:967:7ff1:e0bb:9f5e`
-- Client listener: single dual-stack socket `*:4000` (`v6only:0`)
-- BusyPipe server listener: single dual-stack socket `*:4000` (`v6only:0`)
-- Server-side TCP target: `127.0.0.1:3306`
-
-The remote hosts had Python `3.7.3` and `3.9.2`. Because `pyproject.toml` currently declares Python `3.11+`, the deployment runs directly from source instead of using `pip install`.
-
-The deployment uses dual-stack listeners on both sides. BusyPipe opens one normal TCP connection per wrapped local connection; address selection, MPTCP subflows, and cross-interface behavior are left to the operating system.
-
-Source layout on both hosts:
-
-```text
-~/busypipe-app
-```
-
-Server command:
+Server example:
 
 ```sh
-cd ~/busypipe-app
+cd ~/busypipe
 setsid /usr/bin/python3 -m busypipe.wrap server \
   --listen-host :: \
   --listen-port 4000 \
@@ -145,14 +127,14 @@ setsid /usr/bin/python3 -m busypipe.wrap server \
 echo $! > busypipe-wrap-server.pid
 ```
 
-Client command:
+Client example:
 
 ```sh
-cd ~/busypipe-app
+cd ~/busypipe
 setsid /usr/bin/python3 -m busypipe.wrap client \
   --listen-host :: \
   --listen-port 4000 \
-  --remote-host 18.183.135.254 \
+  --remote-host busypipe.example.com \
   --remote-port 4000 \
   > busypipe-wrap-client.log 2>&1 < /dev/null &
 echo $! > busypipe-wrap-client.pid
@@ -180,28 +162,10 @@ The hosts supported user-level systemd, but `loginctl show-user "$USER" -p Linge
 Verification checks that both local listeners are active and that the server accepts both address families:
 
 ```sh
-python3 - <<'PY'
-import socket
-
-checks = [
-    ("local_ipv4", socket.AF_INET, ("127.0.0.1", 4000)),
-    ("local_ipv6", socket.AF_INET6, ("::1", 4000)),
-    ("remote_ipv4", socket.AF_INET, ("18.183.135.254", 4000)),
-    ("remote_ipv6", socket.AF_INET6, ("2406:da14:209:100:967:7ff1:e0bb:9f5e", 4000)),
-]
-
-for name, family, address in checks:
-    sock = socket.socket(family, socket.SOCK_STREAM)
-    sock.settimeout(5)
-    try:
-        sock.connect(address)
-        print(name, "ok")
-    finally:
-        sock.close()
-PY
+ss -ltnp | awk 'NR==1 || /:4000/'
 ```
 
-`netstat -antp` should show `0.0.0.0:4000` and `:::4000` listeners. Any additional IPv4 or IPv6 subflows are owned by the OS/MPTCP stack, not by BusyPipe.
+`netstat -antp` or `ss -ltnp` should show IPv4 and IPv6 listeners when using a dual-stack host. Any additional IPv4 or IPv6 subflows are owned by the OS/MPTCP stack, not by BusyPipe.
 
 ## Protocol
 
