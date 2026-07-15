@@ -69,7 +69,7 @@ flowchart TD
 | `min_bps` | `8000` | 最低单向发送速率 |
 | `tick_ms` | `250` | 发送调度周期 |
 | `max_frame_size` | `1400` | 单帧最大字节数 |
-| `idle_timeout_ms` | `15000` | 接收空闲超时 |
+| `idle_timeout_ms` | `120000` | 接收空闲超时 |
 | `min_jitter_bytes` | `8` | 相邻真实数据偏移的最小变化 |
 | `warmup_ms` | `3000` | 连接进入 `ESTABLISHED` 后只发送随机填充的窗口时长 |
 | `direction` | `bidirectional` | 保活方向 |
@@ -82,7 +82,7 @@ flowchart TD
   "min_bps": 8000,
   "tick_ms": 250,
   "max_frame_size": 1400,
-  "idle_timeout_ms": 15000,
+  "idle_timeout_ms": 120000,
   "min_jitter_bytes": 8,
   "warmup_ms": 3000,
   "direction": "bidirectional"
